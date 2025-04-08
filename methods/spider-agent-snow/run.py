@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from spider_agent.envs.spider_agent import Spider_Agent_Env
 from spider_agent.agent.agents import PromptAgent
+from spider_agent.agent.reforce_agent import ReFoRCEAgent # OUR NEW AGENT
 
 
 #  Logger Configs {{{ #
@@ -77,6 +78,15 @@ def config() -> argparse.Namespace:
     parser.add_argument("--local_only", action="store_true")
     parser.add_argument("--dbt_only", action="store_true")
     parser.add_argument("--sf_only", action="store_true")
+
+    # NEW ARGUMENT FOR OUR AGENT
+    parser.add_argument("--agent_type", type=str, default="standard", 
+                   choices=["standard", "reforce"], 
+                   help="Type of agent to use")
+    parser.add_argument("--parallel_count", type=int, default=3, 
+                    help="Number of parallel threads for ReFoRCE")
+    parser.add_argument("--max_refinement", type=int, default=5,
+                    help="Maximum number of refinement iterations")
     
     
     args = parser.parse_args()
@@ -111,16 +121,29 @@ def test(
             "work_dir": "/workspace",
         }
     }
-    
-    agent = PromptAgent(
-        model=args.model,
-        max_tokens=args.max_tokens,
-        top_p=args.top_p,
-        temperature=args.temperature,
-        max_memory_length=args.max_memory_length,
-        max_steps=args.max_steps,
-        use_plan=args.plan
-    )
+        
+    if args.agent_type == "reforce":
+        agent = ReFoRCEAgent(
+            model=args.model,
+            max_tokens=args.max_tokens,
+            top_p=args.top_p,
+            temperature=args.temperature,
+            max_memory_length=args.max_memory_length,
+            max_steps=args.max_steps,
+            parallel_count=args.parallel_count,
+            max_refinement_iterations=args.max_refinement,
+            use_plan=args.plan
+        )
+    else:
+        agent = PromptAgent(
+            model=args.model,
+            max_tokens=args.max_tokens,
+            top_p=args.top_p,
+            temperature=args.temperature,
+            max_memory_length=args.max_memory_length,
+            max_steps=args.max_steps,
+            use_plan=args.plan
+        )
     valid_ids = []
     ## load task configs
     assert os.path.exists(args.test_path) and args.test_path.endswith(".jsonl"), f"Invalid test_path, must be a valid jsonl file: {args.test_path}"
