@@ -26,7 +26,7 @@ logger = logging.getLogger("spider_agent")
 class PromptAgent:
     def __init__(
         self,
-        model="gpt-4",
+        model="qwq-32b",
         max_tokens=1500,
         top_p=0.9,
         temperature=0.5,
