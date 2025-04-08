@@ -58,7 +58,7 @@ def config() -> argparse.Namespace:
     parser.add_argument("--max_memory_length", type=int, default=30)
     parser.add_argument("--suffix", '-s', type=str, default="gpt-4-try1")
     
-    parser.add_argument("--model", type=str, default="gpt-4o")
+    parser.add_argument("--model", type=str, default="qwq-32b")
     parser.add_argument("--temperature", type=float, default=0.5)
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--max_tokens", type=int, default=2500)
