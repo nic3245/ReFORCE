@@ -14,6 +14,7 @@ from spider_agent.agent.agents import PromptAgent
 from spider_agent.agent.reforce_agent import ReFoRCEAgent # OUR NEW AGENT
 
 
+
 #  Logger Configs {{{ #
 logger = logging.getLogger("spider_agent")
 logger.setLevel(logging.DEBUG)
@@ -224,6 +225,8 @@ def test(
             cache_dir="./cache",
             mnt_dir=output_dir
         )
+
+        # env.step(SNOWFLAKE_EXEC_SQL("Select *;", is_save=False))
     
         agent.set_env_and_task(env)
     
