@@ -8,6 +8,7 @@ import logging
 import concurrent.futures
 import json
 import re
+from io import StringIO
 
 from spider_agent.agent.prompts import SNOWFLAKE_REFORCE_SYSTEM
 from spider_agent.agent.action import Action, Bash, Terminate, CreateFile, EditFile, LOCAL_DB_SQL, BIGQUERY_EXEC_SQL, SNOWFLAKE_EXEC_SQL, BQ_GET_TABLES, BQ_GET_TABLE_INFO, BQ_SAMPLE_ROWS
@@ -197,7 +198,7 @@ class ReFoRCEAgent(PromptAgent):
         )
         # If this ^^^ prompt isn't working, we might need to make a separate system prompt
         # TODO fix this llm call (use history messages and such)
-        format_spec = self._get_llm_response(format_prompt)
+        format_spec = call_llm(self.env, format_prompt)
         # TODO parse the output probably
         logger.info(f"Generated format specification: {format_spec}")
         
@@ -236,9 +237,51 @@ class ReFoRCEAgent(PromptAgent):
         output = call_llm(exploration_prompt, self.model, self.max_tokens, self.temperature, self.top_p)
         # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
         # TODO - Algorithm one from the paper
-        def algorithm_one(output):
-            # TODO
-            return "column info" 
+        def algorithm_one(sql_actions):
+            result_dic = {}
+            error_rec = 0
+
+            while len(sql_actions) > 0:
+                sql_action = sql_actions.pop(0)
+                result = self.env.step(sql_action)
+                if ("error" not in result or "traceback" not in result) and result != "SQL command executed successfully. No output.":
+                        df = pd.read_csv(StringIO(result))
+                        empty_cols = df.columns[df.isnull().all()]
+                        if len(empty_cols) == 0:
+                            result_dic[sql_action] = df
+                            error_rec = 0
+                            # append to chat_session.messages
+                            continue
+
+                # correction
+                max_iter = 3
+                simplify = False
+                corrected_sql = None
+
+                for i in range(max_iter):
+                    # TODO - implement method add chat_session as parameter
+                    sql_repr = sql_action.__repr__()
+                    corrected_sql = self_correct(sql_repr, result, chat_session)
+                    result = self.env.step(corrected_sql)
+                    if "error" not in result or "traceback" not in result:
+                        if result != "SQL command executed successfully. No output.":
+                            df = pd.read_csv(StringIO(result))
+                            empty_cols = df.columns[df.isnull().all()]
+                            if len(empty_cols) == 0:
+                                result_dic[sql_action] = df
+                                error_rec = 0
+
+                                # apply correction to rest of sql_actions
+                                for i in range(len(sql_actions)):
+                                    next_sql_repr = sql_actions[i].__repr__()
+                                    next_corrected_sql = self_correct(next_sql_repr, result, chat_session)
+                                    sql_actions[i] = next_corrected_sql
+                                break
+
+                error_rec += 1
+                if error_rec > 5:
+                    return result_dic, chat_session
+            return result_dic, chat_session
         
         column_info = algorithm_one(output)
 
