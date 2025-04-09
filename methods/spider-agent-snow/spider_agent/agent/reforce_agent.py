@@ -73,6 +73,33 @@ class ReFoRCEAgent(PromptAgent):
         # Generate expected format based on instruction and schema
         self.format_spec = self._generate_format_restrictions()
 
+    def _get_llm_response(self, prompt: str) -> str:
+        status = False
+        while not status:
+            messages = self.history_messages.copy()
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Observation: {}\n".format(str(prompt))
+                    }
+                ]
+            })  
+            status, response = call_llm({
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": self.max_tokens,
+                "top_p": self.top_p,
+                "temperature": self.temperature
+            })
+            response = response.strip()
+            if not status:
+                if response in ["context_length_exceeded","rate_limit_exceeded","max_tokens","unknown_error"]:
+                    self.history_messages = [self.history_messages[0]] + self.history_messages[3:]
+                else:
+                    raise Exception(f"Failed to call LLM, response: {response}")
+        return response
 
     
     def _read_file_content(self, file_path: str):
