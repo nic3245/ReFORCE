@@ -197,7 +197,7 @@ class ReFoRCEAgent(PromptAgent):
         )
         # If this ^^^ prompt isn't working, we might need to make a separate system prompt
         # TODO fix this llm call (use history messages and such)
-        format_spec = call_llm(self.env, format_prompt)
+        format_spec = self._get_llm_response(format_prompt)
         # TODO parse the output probably
         logger.info(f"Generated format specification: {format_spec}")
         

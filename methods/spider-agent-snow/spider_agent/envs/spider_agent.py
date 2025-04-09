@@ -124,7 +124,10 @@ class Spider_Agent_Env(gym.Env):
             pass
         
         create_folder_if_not_exists(self.mnt_dir)
+        
         src_dir = pathlib.Path(self.mnt_dir).absolute().__str__()
+            
+
         delete_files_in_folder(self.mnt_dir)
         
         volumes = {src_dir: {'bind': self.work_dir, 'mode': 'rw'}}
