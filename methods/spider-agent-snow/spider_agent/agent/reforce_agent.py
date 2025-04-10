@@ -182,7 +182,7 @@ class ReFoRCEAgent(PromptAgent):
         
         return compressed_schema
     
-    def _generate_format_restrictions(self) -> Dict:
+    def _generate_format_restrictions(self, compressed_schema, max_tries=5) -> Dict:
         """
         Generate expected answer format based on task instruction and schema. 
         This is done by giving a separate chat session and format prompt.
@@ -192,22 +192,40 @@ class ReFoRCEAgent(PromptAgent):
         Returns:
             Dict: Format specification
         """
-        # This is just ripped out of the paper describing how the format spec needs to be.
-        # it wasn't actually said to be their prompt but it sure reads like it
-        # TODO - definitely needs some editing on this prompt
-        # TODO - make a different system prompt and history messages for only formatting
-        format_prompt =  (
-            "The response must strictly adhere to the specified format in CSV style, ensuring alignment with executed CSV files. "
-            "Each column should be explicitly defined, including all necessary attributes, and each record should occupy a separate row. "
-            "The format should account for specific cases, such as superlatives, percentages, or coordinates, ensuring the output is concise, clear, and unambiguous. "
-            "For ambiguous terms, potential values or additional columns can be added to maintain clarity and precision."
-        )
-        # If this ^^^ prompt isn't working, we might need to make a separate system prompt
-        # TODO fix this llm call (use history messages and such instead of format_prompt only)
-        # FIXME doesn't work, make it into a payload
-        # XXX
-        format_spec = self._get_llm_response(format_prompt, "Generating Format Restrictions", self.history_messages)
-        # TODO parse the output probably
+        self.format_history = []
+        format_prompt =  f"""################### INSTRUCTIONS ###################
+Your goal is to generate a format specification for the expected answer based on the task instruction and the database schema. This should be a CSV with each column should be explicitly defined, including all necessary attributes, and each record should occupy a separate row 
+The format should account for specific cases, such as superlatives, percentages, or coordinates, ensuring the output is concise, clear, and unambiguous. For ambiguous terms, potential values or additional columns can be added to maintain clarity and precision. 
+Your response should be prefixed by "Format Specification: ". The CSV should have the first line contain column names, and the second line contain types. The last column should always be num_rows, and its value should be the number of rows in the expected output. -1 can be used to indicate any number of rows.
+################### EXAMPLE ###################
+Example task: Identify the case barcodes from the TCGA - LAML study with the highest weighted average copy number in cytoband 15q11 on chromosome 15, using segment data and cytoband overlaps from TCGA's genomic and Mitelman databases.
+Format Specification: 
+case_barcode,weighted_average_copy_number, num_rows
+str, float, 1
+################### SCHEMA ###################
+This is a compressed database schema with representative tables:
+{compressed_schema}
+################### TASK ###################
+Task:
+{self.instruction}
+"""
+        flag = True
+        tries = 0
+        while flag and tries <= max_tries:
+            format_spec = self._get_llm_response(format_prompt, "", self.format_history)
+            logger.info(f"LLM response for format specification: {format_spec}")
+            tries += 1
+            try: 
+                format_spec = pd.read_csv(StringIO(format_spec))
+                if 'num_rows' in format_spec.columns:
+                    flag = False
+                else: # no num_rows column, try again
+                    flag = True
+                    self.format_history.append({"role": "assistant", "content": format_spec}, {"role": "user", "content": "You produced a valid CSV, but it did not contain a num_rows column. Try again, and make sure your CSV has a num_rows column."})
+            except Exception as e: # invalid csv, try again
+                logger.error(f"Error parsing format specification: {e}")
+                flag = True
+                self.format_history.append({"role": "assistant", "content": format_spec}, {"role": "user", "content": "Failed to parse CSV from your response. Make sure your answer is prefixed with \"Format Specification: \" and is a valid CSV."})
         logger.info(f"Generated format specification: {format_spec}")
         
         return format_spec
