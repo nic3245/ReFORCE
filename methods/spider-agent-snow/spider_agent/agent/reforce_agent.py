@@ -47,7 +47,6 @@ class ReFoRCEAgent(PromptAgent):
         self.max_refinement_iterations = max_refinement_iterations
         self.results_cache = {}  # Cache for storing execution results
         self.format_specs = {}   # Store format specifications
-        self.correction_messages = []
         
     def set_env_and_task(self, env):
         """
@@ -228,11 +227,13 @@ class ReFoRCEAgent(PromptAgent):
         Returns:
             Dict: Column information
         """
+        self.correction_messages = []
         exploration_prompt = f"""{prompt}
         ######## COLUMN EXPLORATION ########
         Before tackling the task, first generate SQL queries to carry out column exploration. Identify relevant columns and sample values that will help complete the task."""
         # If this ^^^ prompt isn't working, we might need to make a separate system prompt TODO make into system prompt with separate chat message
         output = call_llm(exploration_prompt, self.model, self.max_tokens, self.temperature, self.top_p)
+        print(output)
         # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
         # TODO - Algorithm one from the paper
         def algorithm_one(sql_actions):
@@ -261,7 +262,7 @@ class ReFoRCEAgent(PromptAgent):
                     {result}
                 """
 
-                header = ""
+                header = "SQL Correction Task"
                 correction = self._get_llm_response(correction_prompt, header, self.correction_messages)
                 correction_result = f"""
 
@@ -283,11 +284,8 @@ class ReFoRCEAgent(PromptAgent):
                             "text": f"{message}"
                         }
                     ]
-                })  
-                
+                }) 
                 return correction
-            
-
             result_dic = {}
             error_rec = 0
 
@@ -346,16 +344,13 @@ class ReFoRCEAgent(PromptAgent):
                                     next_corrected_sql = self_correct(next_sql_repr, result)
                                     sql_actions[i] = next_corrected_sql
                                 break
-
                 error_rec += 1
                 if error_rec > 5:
                     return result_dic
-            return result_dic 
+            return result_dic
         
         column_info = algorithm_one(output)
-
         logger.info(f"Generated column info specification: {column_info}")
-        
         return column_info
     
     def _prompt_agent_until_sql_query(self, obs):
@@ -385,62 +380,62 @@ class ReFoRCEAgent(PromptAgent):
         
         return action, obs
     
-    def _self_refinement(self, prompt: str, exploration_results: Dict, format_spec: Dict):
-        """
-        Execute the self-refinement workflow.
-        This is just algo 2 from the paper, but basically it's just refining the result over and over.
-        """
-        # Can also somewhat base this off of PromptAGent as far as executing actions goes, even though it'll just be sql
-        # A lot of the PromptAgent stuff is written so that it can be multi-modal databases but we're just sql for now.
-        # TODO: algorithm two from the paper (including validate result based on format spec)
-        logger.info("TODO: algorithm two from the paper")
-        assert self.env is not None, "Environment is not set."
-        itercount = 0
-        results_tables = []
-        last_message_index = len(self.history_messages)
-        while itercount < self.max_steps: # number of overall individual! tries to give it and total possible queries
-            error_count = 0
-            obs = f"{str(prompt)}\nThese are the results of exploring the schema: {exploration_results}"
-            self.history_messages = self.history_messages[:last_message_index] # reset history for each iteration
-            # prompt until you get a sql query
-            action, obs = self._prompt_agent_until_sql_query(obs)
-            # Once you have a SQL query, refine until works or too many consecutive errors
-            while error_count < 3:
-                # TODO abstract from swamy algo 1
-                if response_is_valid(obs):
-                    # Parse results into a DataFrame (assume this function exists)
-                    df_csv = parse_to_dataframe(response)
+    # def _self_refinement(self, prompt: str, exploration_results: Dict, format_spec: Dict):
+    #     """
+    #     Execute the self-refinement workflow.
+    #     This is just algo 2 from the paper, but basically it's just refining the result over and over.
+    #     """
+    #     # Can also somewhat base this off of PromptAGent as far as executing actions goes, even though it'll just be sql
+    #     # A lot of the PromptAgent stuff is written so that it can be multi-modal databases but we're just sql for now.
+    #     # TODO: algorithm two from the paper (including validate result based on format spec)
+    #     logger.info("TODO: algorithm two from the paper")
+    #     assert self.env is not None, "Environment is not set."
+    #     itercount = 0
+    #     results_tables = []
+    #     last_message_index = len(self.history_messages)
+    #     while itercount < self.max_steps: # number of overall individual! tries to give it and total possible queries
+    #         error_count = 0
+    #         obs = f"{str(prompt)}\nThese are the results of exploring the schema: {exploration_results}"
+    #         self.history_messages = self.history_messages[:last_message_index] # reset history for each iteration
+    #         # prompt until you get a sql query
+    #         action, obs = self._prompt_agent_until_sql_query(obs)
+    #         # Once you have a SQL query, refine until works or too many consecutive errors
+    #         while error_count < 3:
+    #             # TODO abstract from swamy algo 1
+    #             if response_is_valid(obs):
+    #                 # Parse results into a DataFrame (assume this function exists)
+    #                 df_csv = parse_to_dataframe(response)
 
-                    # Round numeric columns to two decimal places
-                    df_csv = round_numeric_columns(df_csv)
+    #                 # Round numeric columns to two decimal places
+    #                 df_csv = round_numeric_columns(df_csv)
 
-                    # Check if there are nested values (assume this function exists)
-                    if not has_nested_values(df_csv) and is_expected_format(df_csv):
-                        # Append to results if valid
-                        results_tables.append((action, df_csv))
+    #                 # Check if there are nested values (assume this function exists)
+    #                 if not has_nested_values(df_csv) and is_expected_format(df_csv):
+    #                     # Append to results if valid
+    #                     results_tables.append((action, df_csv))
                         
-                        # Save results (assume these functions exist)
-                        save_refined_query(action)
-                        save_results(df_csv)
+    #                     # Save results (assume these functions exist)
+    #                     save_refined_query(action)
+    #                     save_results(df_csv)
 
-                        # Check for self-consistency
-                        if results_tables.count((action, df_csv)) >= 2:
-                            logger.info("Self consistency satisfied")
-                            return results_tables
-                else:
-                    # Increment error counter
-                    error_count += 1
+    #                     # Check for self-consistency
+    #                     if results_tables.count((action, df_csv)) >= 2:
+    #                         logger.info("Self consistency satisfied")
+    #                         return results_tables
+    #             else:
+    #                 # Increment error counter
+    #                 error_count += 1
 
-                    # refine sql query and try again
-                    action, obs = self._prompt_agent_until_sql_query(obs)
-                    # If too many consecutive errors, terminate
-                    if error_count >= 3:
-                        logger.info(f"Max errors reach for iteration: {itercount}")
+    #                 # refine sql query and try again
+    #                 action, obs = self._prompt_agent_until_sql_query(obs)
+    #                 # If too many consecutive errors, terminate
+    #                 if error_count >= 3:
+    #                     logger.info(f"Max errors reach for iteration: {itercount}")
                         
-            itercount += 1
+    #         itercount += 1
 
-        # Return final refined SQL and result
-        return results_tables if results_tables else None
+    #     # Return final refined SQL and result
+    #     return results_tables if results_tables else None
     
     def run(self, natural_language_query):
         """
@@ -466,24 +461,25 @@ class ReFoRCEAgent(PromptAgent):
 
         # Step 4: Column exploration
         exploration_results = self._explore_columns(initial_prompt)
+        print(exploration_results)
 
-        # Step 5: Self-refinement using parallel execution for robustness
-        num_parallel_runs = 3
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel_runs) as executor:
-            futures = [executor.submit(self._self_refinement,
-                                         initial_prompt,
-                                         exploration_results,
-                                         expected_format)
-                       for _ in range(num_parallel_runs)]
-            refined_sqls = [future.result() for future in futures]
+        # # Step 5: Self-refinement using parallel execution for robustness
+        # num_parallel_runs = 3
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel_runs) as executor:
+        #     futures = [executor.submit(self._self_refinement,
+        #                                  initial_prompt,
+        #                                  exploration_results,
+        #                                  expected_format)
+        #                for _ in range(num_parallel_runs)]
+        #     refined_sqls = [future.result() for future in futures]
 
-        # Simple voting mechanism: choose the SQL query that appears most frequently. TODO refine this maybe
-        final_sql = max(set(refined_sqls), key=refined_sqls.count)
-        logger.info(f"\nFinal SQL selected after voting:{final_sql}")
+        # # Simple voting mechanism: choose the SQL query that appears most frequently. TODO refine this maybe
+        # final_sql = max(set(refined_sqls), key=refined_sqls.count)
+        # logger.info(f"\nFinal SQL selected after voting:{final_sql}")
 
-        # Step 6: Execute final query and return the result.
-        self.env.step(SNOWFLAKE_EXEC_SQL(final_sql, is_save=True, save_path='results.csv'))
-        final_obs = self.env.step(Terminate('results.csv'))
-        return final_sql
+        # # Step 6: Execute final query and return the result.
+        # self.env.step(SNOWFLAKE_EXEC_SQL(final_sql, is_save=True, save_path='results.csv'))
+        # final_obs = self.env.step(Terminate('results.csv'))
+        # return final_sql
     
         # TODO This does not include redoing if voting fails, or CTE-based refinement
