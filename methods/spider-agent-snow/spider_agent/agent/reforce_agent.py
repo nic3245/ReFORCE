@@ -194,9 +194,10 @@ class ReFoRCEAgent(PromptAgent):
         """
         self.format_history = []
         format_prompt =  f"""################### INSTRUCTIONS ###################
-Your goal is to generate a format specification for the expected answer based on the task instruction and the database schema. This should be a CSV with each column should be explicitly defined, including all necessary attributes, and each record should occupy a separate row 
+Your goal is to generate a format specification for the expected answer based on the task instruction and the database schema. This should be a CSV where each column should be explicitly defined, including all necessary attributes.
 The format should account for specific cases, such as superlatives, percentages, or coordinates, ensuring the output is concise, clear, and unambiguous. For ambiguous terms, potential values or additional columns can be added to maintain clarity and precision. 
-Your response should be prefixed by "Format Specification: ". The CSV should have the first line contain column names, and the second line contain types. The last column should always be num_rows, and its value should be the number of rows in the expected output. -1 can be used to indicate any number of rows.
+Your response should be prefixed by "Format Specification: ". The CSV should have two lines, with the first line containing column names. The last column should always be num_rows, and its value in the second should be the number of rows in the expected output. -1 should be used to indicate any number of rows.
+The values for the other columns in the second row should be their data type.
 ################### EXAMPLE ###################
 Example task: Identify the case barcodes from the TCGA - LAML study with the highest weighted average copy number in cytoband 15q11 on chromosome 15, using segment data and cytoband overlaps from TCGA's genomic and Mitelman databases.
 Format Specification: 
@@ -212,20 +213,32 @@ Task:
         flag = True
         tries = 0
         while flag and tries <= max_tries:
-            format_spec = self._get_llm_response(format_prompt, "", self.format_history)
-            logger.info(f"LLM response for format specification: {format_spec}")
+            response = self._get_llm_response(format_prompt, "", self.format_history)
+            logger.info(f"LLM response for format specification: {response}")
             tries += 1
             try: 
-                format_spec = pd.read_csv(StringIO(format_spec))
+                match = re.finditer(r"Format Specification:\s*(.*?)(?:'|\"|$|\n\n)", response, re.DOTALL)
+                if match:
+                    result = list(match)[-1].group(1)
+                    format_spec = pd.read_csv(StringIO(result))
+                else:
+                    raise ValueError("No format specification prefix.")
                 if 'num_rows' in format_spec.columns:
-                    flag = False
+                    if 'num_rows' in format_spec.select_dtypes(include=[np.number]).columns:
+                        flag = False
+                    else:
+                        flag = True
+                        # TODO fix history appending
+                        self.format_history.extend([{"role": "assistant", "content": [{"type": "text", "text": response}]}, {"role": "user", "content": [{"type": "text", "text": "You produced a valid CSV with a num_rows column, but its value was not a number. Try again, and make sure your CSV's num_rows column is either -1 (any number of rows) or the actual number of rows that the answer would contain."}]}])
                 else: # no num_rows column, try again
                     flag = True
-                    self.format_history.append({"role": "assistant", "content": format_spec}, {"role": "user", "content": "You produced a valid CSV, but it did not contain a num_rows column. Try again, and make sure your CSV has a num_rows column."})
+                    # TODO fix history appending
+                    self.format_history.extend([{"role": "assistant", "content": [{"type": "text", "text": response}]}, {"role": "user", "content": [{"type": "text", "text": "You produced a valid CSV, but it did not contain a num_rows column. Try again, and make sure your CSV has a num_rows column."}]}])
             except Exception as e: # invalid csv, try again
                 logger.error(f"Error parsing format specification: {e}")
                 flag = True
-                self.format_history.append({"role": "assistant", "content": format_spec}, {"role": "user", "content": "Failed to parse CSV from your response. Make sure your answer is prefixed with \"Format Specification: \" and is a valid CSV."})
+                # TODO fix history appending
+                self.format_history.extend([{"role": "assistant", "content": [{"type": "text", "text": response}]}, {"role": "user", "content": [{"type": "text", "text": "Failed to parse CSV from your response. Make sure your answer is prefixed with \"Format Specification: \" and is a valid CSV."}]}])
         logger.info(f"Generated format specification: {format_spec}")
         
         return format_spec
@@ -572,7 +585,7 @@ Task:
         compressed_schema = self._compress_schema(raw_schema)
 
         # Step 2: Generate format restrictions
-        expected_format = self._generate_format_restrictions()
+        expected_format = self._generate_format_restrictions(compressed_schema)
 
         # Step 3: Generate initial prompt
         initial_prompt = self._generate_initial_prompt(compressed_schema, expected_format)
