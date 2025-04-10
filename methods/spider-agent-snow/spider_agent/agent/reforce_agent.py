@@ -244,6 +244,7 @@ class ReFoRCEAgent(PromptAgent):
         Before tackling the task, first generate SQL queries to carry out column exploration. Identify relevant columns and sample values that will help complete the task."""
         # If this ^^^ prompt isn't working, we might need to make a separate system prompt TODO make into system prompt with separate chat message
         output = call_llm(exploration_prompt, self.model, self.max_tokens, self.temperature, self.top_p)
+        print(output)
         # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
         # TODO - Algorithm one from the paper
         def algorithm_one(sql_actions):
@@ -294,11 +295,8 @@ class ReFoRCEAgent(PromptAgent):
                             "text": f"{message}"
                         }
                     ]
-                })  
-                
+                }) 
                 return correction
-            
-
             result_dic = {}
             error_rec = 0
 
@@ -357,16 +355,13 @@ class ReFoRCEAgent(PromptAgent):
                                     next_corrected_sql = self_correct(next_sql_repr, result)
                                     sql_actions[i] = next_corrected_sql
                                 break
-
                 error_rec += 1
                 if error_rec > 5:
                     return result_dic
-            return result_dic 
+            return result_dic
         
         column_info = algorithm_one(output)
-
         logger.info(f"Generated column info specification: {column_info}")
-        
         return column_info
     
     def _prompt_agent_until_sql_query(self, obs):
@@ -508,7 +503,7 @@ class ReFoRCEAgent(PromptAgent):
         3. Generate the initial prompt.
         4. Perform column exploration to clarify ambiguities.
         5. Execute self-refinement (in parallel threads) to generate the final SQL.
-        6s. Execute the final SQL and return the result.
+        6. Execute the final SQL and return the result.
         """
         # Step 0: Get the raw schema
         raw_schema = self._get_raw_schema()
@@ -524,6 +519,7 @@ class ReFoRCEAgent(PromptAgent):
 
         # Step 4: Column exploration
         exploration_results = self._explore_columns(initial_prompt)
+        print(exploration_results)
 
         # Step 5: Self-refinement using parallel execution for robustness
         # TODO - fix with signals b/c they don't work if not in main thread :( big sad
