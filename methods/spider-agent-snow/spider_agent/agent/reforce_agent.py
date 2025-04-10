@@ -47,6 +47,7 @@ class ReFoRCEAgent(PromptAgent):
         self.max_refinement_iterations = max_refinement_iterations
         self.results_cache = {}  # Cache for storing execution results
         self.format_specs = {}   # Store format specifications
+        self.correction_messages = []
         
     def set_env_and_task(self, env):
         """
@@ -91,7 +92,7 @@ class ReFoRCEAgent(PromptAgent):
             response = response.strip()
             if not status:
                 if response in ["context_length_exceeded","rate_limit_exceeded","max_tokens","unknown_error"]:
-                    self.history_messages = [self.history_messages[0]] + self.history_messages[3:]
+                    history_messages = [history_messages[0]] + history_messages[3:]
                 else:
                     raise Exception(f"Failed to call LLM, response: {response}")
         return response
@@ -235,6 +236,58 @@ class ReFoRCEAgent(PromptAgent):
         # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
         # TODO - Algorithm one from the paper
         def algorithm_one(sql_actions):
+            def self_correct(sql_repr, result):
+                correction_prompt = f"""
+                    You are an expert SQL assistant. You will be given:
+                    - An incorrect user generated SQL query
+                    - The results from running that query
+
+                    Your task is to **correct the SQL query** so that it runs correctly and returns valid, structured results. 
+                    Use all previous information provided to you and your expert SQL knowledge to correct the query. 
+
+                    Here are your goals:
+                    1. Fix all syntax errors in the SQL query.
+                    2. Logically verify that the query can return the intended correct results.
+                    3. Ensure the query returns a non-empty, meaningful result.
+                    4. Avoid columns with all NULL values or obviously invalid data types.
+                    5. If the original query seems too complex or ambiguous, simplify it while preserving intent.
+                    
+                    Respond with **only one corrected SQL query**. Do not include any explanation or comments.
+
+                    User Generated SQL Query:
+                    {sql_repr}
+
+                    Execution Result:
+                    {result}
+                """
+
+                header = ""
+                correction = self._get_llm_response(correction_prompt, header, self.correction_messages)
+                correction_result = f"""
+
+                    The previous query was corrected as follows:
+
+                    Corrected SQL Query:
+                    {correction}
+
+                    Please use this as context for future improvements or related queries.
+                """
+
+                message = correction_prompt + correction_result
+                
+                self.correction_messages.append({
+                    "role": "user", # XXX idk if this works
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"{message}"
+                        }
+                    ]
+                })  
+                
+                return correction
+            
+
             result_dic = {}
             error_rec = 0
 
@@ -247,7 +300,26 @@ class ReFoRCEAgent(PromptAgent):
                         if len(empty_cols) == 0:
                             result_dic[sql_action] = df
                             error_rec = 0
-                            # append to chat_session.messages
+                            message = f"""
+                                The following SQL query executed successfully and returned correct results:
+
+                                Query:
+                                {sql_action.__repr__()}
+
+                                Result (first 5 or fewer rows):
+                                {df.head(5).to_string(index=False)}
+
+                                This query does not need need to be revised. Please remember this query and its result as context for future corrections.
+                                """
+                            self.correction_messages.append({
+                                "role": "user", # XXX idk if this works
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": f"{message}"
+                                    }
+                                ]
+                            })  
                             continue
 
                 # correction
@@ -258,7 +330,7 @@ class ReFoRCEAgent(PromptAgent):
                 for i in range(max_iter):
                     # TODO - implement method add chat_session as parameter
                     sql_repr = sql_action.__repr__()
-                    corrected_sql = self_correct(sql_repr, result, chat_session)
+                    corrected_sql = self_correct(sql_repr, result)
                     result = self.env.step(corrected_sql)
                     if "error" not in result or "traceback" not in result:
                         if result != "SQL command executed successfully. No output.":
@@ -271,14 +343,14 @@ class ReFoRCEAgent(PromptAgent):
                                 # apply correction to rest of sql_actions
                                 for i in range(len(sql_actions)):
                                     next_sql_repr = sql_actions[i].__repr__()
-                                    next_corrected_sql = self_correct(next_sql_repr, result, chat_session)
+                                    next_corrected_sql = self_correct(next_sql_repr, result)
                                     sql_actions[i] = next_corrected_sql
                                 break
 
                 error_rec += 1
                 if error_rec > 5:
-                    return result_dic, chat_session
-            return result_dic, chat_session 
+                    return result_dic
+            return result_dic 
         
         column_info = algorithm_one(output)
 
