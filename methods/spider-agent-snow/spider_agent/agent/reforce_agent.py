@@ -67,23 +67,17 @@ class ReFoRCEAgent(PromptAgent):
                 },
             ]
         })
-        
-        # Apply table compression to the schema information
-        self.compressed_schema = self._compress_schema()
-        
-        # Generate expected format based on instruction and schema
-        self.format_spec = self._generate_format_restrictions()
 
-    def _get_llm_response(self, prompt: str) -> str:
+    def _get_llm_response(self, prompt: str, header: str, history_messages: List[Dict]) -> str:
         status = False
         while not status:
-            messages = self.history_messages.copy()
+            messages = history_messages.copy()
             messages.append({
-                "role": "user",
+                "role": "user", # XXX idk if this works
                 "content": [
                     {
                         "type": "text",
-                        "text": "Observation: {}\n".format(str(prompt))
+                        "text": f"{str(header)}: {str(prompt)}\n"
                     }
                 ]
             })  
@@ -180,7 +174,7 @@ class ReFoRCEAgent(PromptAgent):
     def _generate_format_restrictions(self) -> Dict:
         """
         Generate expected answer format based on task instruction and schema. 
-        This is done by giving a separate chat session an format prompt.
+        This is done by giving a separate chat session and format prompt.
         It then gives you a csv or smth i don't know that yet with the necessary columns and types and stuff.
         That will be used/enforced later in self-refinement.
         
@@ -190,6 +184,7 @@ class ReFoRCEAgent(PromptAgent):
         # This is just ripped out of the paper describing how the format spec needs to be.
         # it wasn't actually said to be their prompt but it sure reads like it
         # TODO - definitely needs some editing on this prompt
+        # TODO - make a different system prompt and history messages for only formatting
         format_prompt =  (
             "The response must strictly adhere to the specified format in CSV style, ensuring alignment with executed CSV files. "
             "Each column should be explicitly defined, including all necessary attributes, and each record should occupy a separate row. "
@@ -197,7 +192,9 @@ class ReFoRCEAgent(PromptAgent):
             "For ambiguous terms, potential values or additional columns can be added to maintain clarity and precision."
         )
         # If this ^^^ prompt isn't working, we might need to make a separate system prompt
-        # TODO fix this llm call (use history messages and such)
+        # TODO fix this llm call (use history messages and such instead of format_prompt only)
+        # FIXME doesn't work, make it into a payload
+        # XXX
         format_spec = call_llm(self.env, format_prompt)
         # TODO parse the output probably
         logger.info(f"Generated format specification: {format_spec}")
@@ -233,7 +230,7 @@ class ReFoRCEAgent(PromptAgent):
         exploration_prompt = f"""{prompt}
         ######## COLUMN EXPLORATION ########
         Before tackling the task, first generate SQL queries to carry out column exploration. Identify relevant columns and sample values that will help complete the task."""
-        # If this ^^^ prompt isn't working, we might need to make a separate system prompt
+        # If this ^^^ prompt isn't working, we might need to make a separate system prompt TODO make into system prompt with separate chat message
         output = call_llm(exploration_prompt, self.model, self.max_tokens, self.temperature, self.top_p)
         # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
         # TODO - Algorithm one from the paper
@@ -281,7 +278,7 @@ class ReFoRCEAgent(PromptAgent):
                 error_rec += 1
                 if error_rec > 5:
                     return result_dic, chat_session
-            return result_dic, chat_session
+            return result_dic, chat_session 
         
         column_info = algorithm_one(output)
 
@@ -289,7 +286,34 @@ class ReFoRCEAgent(PromptAgent):
         
         return column_info
     
-    def _self_refinement(self, prompt: str, exploration_results: Dict, format_spec: Dict, max_iter=3):
+    def _prompt_agent_until_sql_query(self, obs):
+        action = None
+        while not isinstance(action, SNOWFLAKE_EXEC_SQL):
+            # Get action and execute until it's a SQL query
+            _, action = self.predict(obs)
+
+            if action is None:
+                logger.info("Failed to parse action from response, try again.")
+                retry_count += 1
+                if retry_count > 3:
+                    logger.info("Failed to parse action from response, stop.")
+                    break
+                obs = "Failed to parse action from your response, make sure you provide a valid action."
+            else:
+                if last_action is not None and last_action == action:
+                    if repeat_action:
+                        return False, "ERROR: Repeated action"
+                    else:
+                        obs = "The action is the same as the last one, you MUST provide a DIFFERENT SQL code or Python Code or different action. you MUST provide a DIFFERENT SQL code or Python Code or different action. you MUST provide a DIFFERENT SQL code or Python Code or different action."
+                        repeat_action = True
+                else:
+                    obs, _ = self.env.step(action)
+                    last_action = action
+                    repeat_action = False
+        
+        return action, obs
+    
+    def _self_refinement(self, prompt: str, exploration_results: Dict, format_spec: Dict):
         """
         Execute the self-refinement workflow.
         This is just algo 2 from the paper, but basically it's just refining the result over and over.
@@ -298,7 +322,53 @@ class ReFoRCEAgent(PromptAgent):
         # A lot of the PromptAgent stuff is written so that it can be multi-modal databases but we're just sql for now.
         # TODO: algorithm two from the paper (including validate result based on format spec)
         logger.info("TODO: algorithm two from the paper")
-        pass
+        assert self.env is not None, "Environment is not set."
+        itercount = 0
+        results_tables = []
+        last_message_index = len(self.history_messages)
+        while itercount < self.max_steps: # number of overall individual! tries to give it and total possible queries
+            error_count = 0
+            obs = f"{str(prompt)}\nThese are the results of exploring the schema: {exploration_results}"
+            self.history_messages = self.history_messages[:last_message_index] # reset history for each iteration
+            # prompt until you get a sql query
+            action, obs = self._prompt_agent_until_sql_query(obs)
+            # Once you have a SQL query, refine until works or too many consecutive errors
+            while error_count < 3:
+                # TODO abstract from swamy algo 1
+                if response_is_valid(obs):
+                    # Parse results into a DataFrame (assume this function exists)
+                    df_csv = parse_to_dataframe(response)
+
+                    # Round numeric columns to two decimal places
+                    df_csv = round_numeric_columns(df_csv)
+
+                    # Check if there are nested values (assume this function exists)
+                    if not has_nested_values(df_csv) and is_expected_format(df_csv):
+                        # Append to results if valid
+                        results_tables.append((action, df_csv))
+                        
+                        # Save results (assume these functions exist)
+                        save_refined_query(action)
+                        save_results(df_csv)
+
+                        # Check for self-consistency
+                        if results_tables.count((action, df_csv)) >= 2:
+                            logger.info("Self consistency satisfied")
+                            return results_tables
+                else:
+                    # Increment error counter
+                    error_count += 1
+
+                    # refine sql query and try again
+                    action, obs = self._prompt_agent_until_sql_query(obs)
+                    # If too many consecutive errors, terminate
+                    if error_count >= 3:
+                        logger.info(f"Max errors reach for iteration: {itercount}")
+                        
+            itercount += 1
+
+        # Return final refined SQL and result
+        return results_tables if results_tables else None
     
     def run(self, natural_language_query):
         """
@@ -340,7 +410,8 @@ class ReFoRCEAgent(PromptAgent):
         logger.info(f"\nFinal SQL selected after voting:{final_sql}")
 
         # Step 6: Execute final query and return the result.
-        final_result = self.db.execute(final_sql)
-        return final_result
+        self.env.step(SNOWFLAKE_EXEC_SQL(final_sql, is_save=True, save_path='results.csv'))
+        final_obs = self.env.step(Terminate('results.csv'))
+        return final_sql
     
         # TODO This does not include redoing if voting fails, or CTE-based refinement
