@@ -162,7 +162,7 @@ class ReFoRCEAgent(PromptAgent):
                 if content:
                     schema_info[file_path] = content
 
-        logger.info(f"Schema extracted files: {schema_info.keys()[:min(5, len(schema_info.keys()))]}")
+        logger.info(f"Schema extracted files: {list(schema_info.keys())[:min(5, len(schema_info.keys()))]}")
         
         return schema_info
     
@@ -206,7 +206,7 @@ class ReFoRCEAgent(PromptAgent):
         # TODO fix this llm call (use history messages and such instead of format_prompt only)
         # FIXME doesn't work, make it into a payload
         # XXX
-        format_spec = call_llm(self.env, format_prompt)
+        format_spec = self._get_llm_response(format_prompt, "Generating Format Restrictions", self.history_messages)
         # TODO parse the output probably
         logger.info(f"Generated format specification: {format_spec}")
         
@@ -239,12 +239,36 @@ class ReFoRCEAgent(PromptAgent):
             Dict: Column information
         """
         self.correction_messages = []
-        exploration_prompt = f"""{prompt}
+        exploration_prompt = f"""
+        {prompt}
+
         ######## COLUMN EXPLORATION ########
-        Before tackling the task, first generate SQL queries to carry out column exploration. Identify relevant columns and sample values that will help complete the task."""
-        # If this ^^^ prompt isn't working, we might need to make a separate system prompt TODO make into system prompt with separate chat message
-        output = call_llm(exploration_prompt, self.model, self.max_tokens, self.temperature, self.top_p)
-        print(output)
+        Your task is to prepare for answering the user's question by exploring the database schema in depth. Use the provided compressed schema and all relevant information. 
+        Ignore any chain-of-thought instructions mentioned previously that are not related to column exploration.
+
+        ### Instructions:
+        Generate a list of SQL queries that will help you:
+        1. Identify **relevant tables and columns** for the task.
+        2. Retrieve **data types** and **example values** from these columns.
+        3. Understand **nested structures**, if any, by using dialect-specific tools like `LATERAL FLATTEN` for JSON or nested types.
+        4. Observe **column value distributions**, including distinct values, value ranges, or representative samples.
+
+        ### Guidelines:
+        - Use the SQL dialect inferred from the table structure (e.g., Snowflake, BigQuery, SQLite).
+        - Start with **simple SELECT queries** to inspect a few rows from each relevant table.
+        - Progress to **more focused queries** using `SELECT DISTINCT`, basic filtering (`LIKE`, `LIMIT`, etc.).
+        - Include **exploration of nested or JSON fields** using dialect-specific constructs.
+        - Each query should be concise and interpretable on its own.
+        - Avoid using complex CTEs or joins at this stage. Focus on **schema and data understanding**.
+
+        No explanations or commentary—just the queries. Generate until you have a complete exploration or exceed 20 queries.
+        Provide only the SQL statements in a list: Result: ["SQL QUERY 1", "SQL QUERY 2", ...]. 
+        """
+
+        empty_history = []
+        output = self._get_llm_response(exploration_prompt, "Column Exploration", empty_history)
+        logger.info(f"SQL Actions: {output}")
+        logger.info(f"PROMPT: {prompt}")
         # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
         # TODO - Algorithm one from the paper
         def algorithm_one(sql_actions):
@@ -297,65 +321,83 @@ class ReFoRCEAgent(PromptAgent):
                     ]
                 }) 
                 return correction
+            
+            sql_coms = ["SELECT * FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 LIMIT 5;", 
+"SELECT DISTINCT USER_PSEUDO_ID FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111;", 
+"SELECT EVENT_DATE, COUNT(*) FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 GROUP BY EVENT_DATE;", 
+"SELECT TO_DATE(TO_TIMESTAMP_NTZ(EVENT_TIMESTAMP/1e6)) AS event_date FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 LIMIT 5;", 
+"SELECT EVENT_NAME, COUNT(*) FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 GROUP BY EVENT_NAME LIMIT 10;", 
+"SELECT USER_PSEUDO_ID, COUNT(*) FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 GROUP BY USER_PSEUDO_ID HAVING COUNT(*) > 1;", 
+"SELECT * FROM LATERAL FLATTEN(INPUT => PARSE_JSON(EVENT_PARAMS)) AS params WHERE KEY = 'search_term' LIMIT 5;"]
+            
+            sql_actions = []
+            for sql in sql_coms:
+                action = SNOWFLAKE_EXEC_SQL(sql_query=sql, is_save=False)
+                sql_actions.append(action)
+
             result_dic = {}
             error_rec = 0
 
             while len(sql_actions) > 0:
                 sql_action = sql_actions.pop(0)
                 result = self.env.step(sql_action)
-                if ("error" not in result or "traceback" not in result) and result != "SQL command executed successfully. No output.":
-                        df = pd.read_csv(StringIO(result))
-                        empty_cols = df.columns[df.isnull().all()]
-                        if len(empty_cols) == 0:
-                            result_dic[sql_action] = df
-                            error_rec = 0
-                            message = f"""
-                                The following SQL query executed successfully and returned correct results:
+                try:
+                    logger.info(f"Result: {result}")
+                    df = pd.read_csv(StringIO(result))
+                    empty_cols = df.columns[df.isnull().all()]
+                    if len(empty_cols) != 0:
+                        raise ValueError(f"Encountered empty columns: {list(empty_cols)}")
+                    result_dic[sql_action] = df
+                    error_rec = 0
+                    message = f"""
+                        The following SQL query executed successfully and returned correct results:
 
-                                Query:
-                                {sql_action.__repr__()}
+                        Query:
+                        {sql_action.__repr__()}
 
-                                Result (first 5 or fewer rows):
-                                {df.head(5).to_string(index=False)}
+                        Result (first 5 or fewer rows):
+                        {df.head(5).to_string(index=False)}
 
-                                This query does not need need to be revised. Please remember this query and its result as context for future corrections.
-                                """
-                            self.correction_messages.append({
-                                "role": "user", # XXX idk if this works
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": f"{message}"
-                                    }
-                                ]
-                            })  
-                            continue
-
+                        This query does not need need to be revised. Please remember this query and its result as context for future corrections.
+                        """
+                    self.correction_messages.append({
+                        "role": "user", # XXX idk if this works
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"{message}"
+                            }
+                        ]
+                    })  
+                    continue
+                except: 
                 # correction
-                max_iter = 3
-                simplify = False
-                corrected_sql = None
+                    max_iter = 3
+                    simplify = False
+                    corrected_sql = None
 
-                for i in range(max_iter):
-                    # TODO - implement method add chat_session as parameter
-                    sql_repr = sql_action.__repr__()
-                    corrected_sql = self_correct(sql_repr, result)
-                    result = self.env.step(corrected_sql)
-                    if "error" not in result or "traceback" not in result:
-                        if result != "SQL command executed successfully. No output.":
+                    for i in range(max_iter):
+                        # TODO - implement method add chat_session as parameter
+                        sql_repr = sql_action.__repr__()
+                        corrected_sql = self_correct(sql_repr, result)
+                        result = self.env.step(corrected_sql)
+                        try:
                             df = pd.read_csv(StringIO(result))
                             empty_cols = df.columns[df.isnull().all()]
-                            if len(empty_cols) == 0:
-                                result_dic[sql_action] = df
-                                error_rec = 0
+                            if len(empty_cols) != 0:
+                                raise ValueError(f"Encountered empty columns: {list(empty_cols)}")
+                        except:
+                            continue
+                        result_dic[sql_action] = df
+                        error_rec = 0
 
-                                # apply correction to rest of sql_actions
-                                for i in range(len(sql_actions)):
-                                    next_sql_repr = sql_actions[i].__repr__()
-                                    next_corrected_sql = self_correct(next_sql_repr, result)
-                                    sql_actions[i] = next_corrected_sql
-                                break
-                error_rec += 1
+                        # apply correction to rest of sql_actions
+                        for i in range(len(sql_actions)):
+                            next_sql_repr = sql_actions[i].__repr__()
+                            next_corrected_sql = self_correct(next_sql_repr, result)
+                            sql_actions[i] = next_corrected_sql
+                        break
+                    error_rec += 1
                 if error_rec > 5:
                     return result_dic
             return result_dic
