@@ -19,7 +19,7 @@ def compress_tables(database_schema: Dict) -> Dict:
     compressed_schema = database_schema.copy()
     
     # Extract table names
-    table_names = list(database_schema.keys()) if isinstance(database_schema, dict) else []
+    table_names =  list(compressed_schema.keys())
     
     # Find table groups with similar naming patterns
     table_groups = _identify_table_patterns(table_names)
@@ -35,14 +35,11 @@ def compress_tables(database_schema: Dict) -> Dict:
         # Keep only the representative in compressed schema
         for table in tables[1:]:
             if table in compressed_schema:
+                print(f"Deleting table: {table}")
                 del compressed_schema[table]
                 
         # Optionally, add a note about compressed tables
-        if representative_table in compressed_schema:
-            if isinstance(compressed_schema[representative_table], dict):
-                compressed_schema[representative_table]["compressed_tables"] = tables[1:]
-            elif hasattr(compressed_schema[representative_table], "__dict__"):
-                compressed_schema[representative_table].compressed_tables = tables[1:]
+        # compressed_schema['compressed_tables'] = tables[1:] or something
     
     return compressed_schema
 
@@ -61,16 +58,16 @@ def _identify_table_patterns(table_names: List[str]) -> Dict[str, List[str]]:
     
     # Common patterns in SQL databases, especially for time-based tables
     # 1. Tables with date suffixes: table_20220101, table_20220102, etc.
-    date_suffix_pattern = r'(.+?)_(\d{8})$'
+    date_suffix_pattern = r'^(.+?)_(\d{8})(?:\.(json|csv))?$'
     
     # 2. Tables with year/month/day components: table_2022_01_01, table_2022_01_02, etc.
-    date_components_pattern = r'(.+?)_(\d{4})_(\d{2})_(\d{2})$'
+    date_components_pattern = r'(.+?)_(\d{4})_(\d{2})_(\d{2})(?:\.(json|csv))?$'
     
     # 3. Tables with version numbers: table_v1, table_v2, etc.
-    version_pattern = r'(.+?)_v(\d+)$'
+    version_pattern = r'(.+?)_v(\d+)(?:\.(json|csv))?$'
     
     # 4. Tables with partition indicators: table_p1, table_p2, etc.
-    partition_pattern = r'(.+?)_p(\d+)$'
+    partition_pattern = r'(.+?)_p(\d+)(?:\.(json|csv))?$'
     
     # Process each table name
     for table_name in table_names:

@@ -9,6 +9,7 @@ import concurrent.futures
 import json
 import re
 from io import StringIO
+import numpy as np
 
 from spider_agent.agent.prompts import SNOWFLAKE_REFORCE_SYSTEM
 from spider_agent.agent.action import Action, Bash, Terminate, CreateFile, EditFile, LOCAL_DB_SQL, BIGQUERY_EXEC_SQL, SNOWFLAKE_EXEC_SQL, BQ_GET_TABLES, BQ_GET_TABLE_INFO, BQ_SAMPLE_ROWS
@@ -47,7 +48,6 @@ class ReFoRCEAgent(PromptAgent):
         self.max_refinement_iterations = max_refinement_iterations
         self.results_cache = {}  # Cache for storing execution results
         self.format_specs = {}   # Store format specifications
-        self.correction_messages = []
         
     def set_env_and_task(self, env):
         """
@@ -116,19 +116,29 @@ class ReFoRCEAgent(PromptAgent):
             if file_path.endswith('.json'):
                 return json.loads(obs)
             elif file_path.endswith('.csv'):
-                # Simple CSV parsing for illustration TODO - REDO WITH CSV MODULE LOL (remember it is a string from cat tho)
-                lines = obs.strip().split('\n')
-                if lines:
-                    headers = lines[0].split(',')
-                    data = []
-                    for line in lines[1:]:
-                        data.append(dict(zip(headers, line.split(','))))
-                    logger.info(f"Data from _read_file_content: {data}")
-                    return {"headers": headers, "data": data}
+                return pd.read_csv(StringIO(obs))
             return obs
         except Exception as e:
-            logger.error(f"Error reading file {file_path}: {str(e)}")
-            return obs
+            iter = 0
+            copy = obs[:]
+            
+            logger.error(f"Error reading file {file_path}: {e}")
+            if isinstance(e, json.JSONDecodeError):
+                flag = True
+                position = e.pos
+                while flag and iter < 10000:
+                    try: 
+                        obs = obs[:position] + ' ' + obs[position+1:]
+                        obs = json.loads(obs)
+                        flag = False
+                    except json.JSONDecodeError as e:
+                        position = e.pos
+                        iter += 1
+                
+            if iter >= 10000:
+                return copy
+            else:
+                return obs
        
     def _get_raw_schema(self) -> Dict:
         """
@@ -228,6 +238,7 @@ class ReFoRCEAgent(PromptAgent):
         Returns:
             Dict: Column information
         """
+        self.correction_messages = []
         exploration_prompt = f"""{prompt}
         ######## COLUMN EXPLORATION ########
         Before tackling the task, first generate SQL queries to carry out column exploration. Identify relevant columns and sample values that will help complete the task."""
@@ -261,7 +272,7 @@ class ReFoRCEAgent(PromptAgent):
                     {result}
                 """
 
-                header = ""
+                header = "SQL Correction Task"
                 correction = self._get_llm_response(correction_prompt, header, self.correction_messages)
                 correction_result = f"""
 
@@ -385,6 +396,37 @@ class ReFoRCEAgent(PromptAgent):
         
         return action, obs
     
+    def _prompt_agent_until_sql_query(self, obs):
+        action = None
+        last_action = None
+        while not isinstance(action, SNOWFLAKE_EXEC_SQL):
+            # Get action and execute until it's a SQL query
+            _, action = self.predict(obs)
+
+            if action is None:
+                logger.info("Failed to parse action from response, try again.")
+                # retry_count += 1
+                # if retry_count > 3:
+                #     logger.info("Failed to parse action from response, stop.")
+                #     break
+                obs = "Failed to parse action from your response, make sure you provide a valid action."
+            else:
+                if last_action is not None and last_action == action:
+                    if repeat_action:
+                        return False, "ERROR: Repeated action"
+                    else:
+                        obs = "The action is the same as the last one, you MUST provide a DIFFERENT SQL code or Python Code or different action. you MUST provide a DIFFERENT SQL code or Python Code or different action. you MUST provide a DIFFERENT SQL code or Python Code or different action."
+                        repeat_action = True
+                else:
+                    obs, _ = self.env.step(action)
+                    last_action = action
+                    repeat_action = False
+        
+        return action, obs
+    
+    def _validate_format(self, df_csv, format_spec):
+        return True # TODO - ACTUALLY IMPLEMENT BASED ON FORMAT SPEC
+
     def _self_refinement(self, prompt: str, exploration_results: Dict, format_spec: Dict):
         """
         Execute the self-refinement workflow.
@@ -407,26 +449,42 @@ class ReFoRCEAgent(PromptAgent):
             # Once you have a SQL query, refine until works or too many consecutive errors
             while error_count < 3:
                 # TODO abstract from swamy algo 1
-                if response_is_valid(obs):
-                    # Parse results into a DataFrame (assume this function exists)
-                    df_csv = parse_to_dataframe(response)
+                if ("error" not in obs or "traceback" not in obs) and obs != "SQL command executed successfully. No output.":
+
+                    # Parse results into a DataFrame
+                    if action.save_path:
+                        df_csv = self._read_file_content(action.save_path)
+                    else:
+                        df_csv = pd.read_csv(obs)
 
                     # Round numeric columns to two decimal places
-                    df_csv = round_numeric_columns(df_csv)
+                    numeric_columns = df_csv.select_dtypes(include=[np.number]).columns
+                    df_csv[numeric_columns] = df_csv[numeric_columns].round(2)
 
-                    # Check if there are nested values (assume this function exists)
-                    if not has_nested_values(df_csv) and is_expected_format(df_csv):
+                    # Explode any nested values
+                    backup_copy = df_csv.copy()
+                    try: 
+                        columns_to_explode = []
+                        for series in df_csv.columns:
+                            if df_csv[series].dtype == "object":
+                                columns_to_explode.append(series)
+                        df_csv = df_csv.explode(columns_to_explode)
+                    except ValueError:
+                        df_csv = backup_copy
+                        for series in df_csv.columns:
+                            if df_csv[series].dtype == "object":
+                                df_csv = df_csv.explode(series)
+                    
+                    if self._validate_format(df_csv, format_spec):
                         # Append to results if valid
-                        results_tables.append((action, df_csv))
-                        
-                        # Save results (assume these functions exist)
-                        save_refined_query(action)
-                        save_results(df_csv)
+                        normalized_df = [frozenset(row) for row in df_csv.values.tolist()]
+                        results_tables.append(normalized_df)
 
                         # Check for self-consistency
-                        if results_tables.count((action, df_csv)) >= 2:
+                        if results_tables.count(normalized_df) >= 2:
                             logger.info("Self consistency satisfied")
-                            return results_tables
+                            return {normalized_df: action}
+                        break # break out of loop for errors as we had a success
                 else:
                     # Increment error counter
                     error_count += 1
@@ -442,7 +500,7 @@ class ReFoRCEAgent(PromptAgent):
         # Return final refined SQL and result
         return results_tables if results_tables else None
     
-    def run(self, natural_language_query):
+    def run(self):
         """
         Overall pipeline:
         1. Compress the schema.
@@ -462,23 +520,29 @@ class ReFoRCEAgent(PromptAgent):
         expected_format = self._generate_format_restrictions()
 
         # Step 3: Generate initial prompt
-        initial_prompt = self._generate_initial_prompt(compressed_schema, expected_format, natural_language_query)
+        initial_prompt = self._generate_initial_prompt(compressed_schema, expected_format)
 
         # Step 4: Column exploration
         exploration_results = self._explore_columns(initial_prompt)
 
         # Step 5: Self-refinement using parallel execution for robustness
-        num_parallel_runs = 3
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel_runs) as executor:
-            futures = [executor.submit(self._self_refinement,
-                                         initial_prompt,
-                                         exploration_results,
-                                         expected_format)
-                       for _ in range(num_parallel_runs)]
-            refined_sqls = [future.result() for future in futures]
+        # TODO - fix with signals b/c they don't work if not in main thread :( big sad
+        num_parallel_runs = 1
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel_runs) as executor:
+        #     futures = [executor.submit(self._self_refinement,
+        #                                  initial_prompt,
+        #                                  exploration_results,
+        #                                  expected_format)
+        #                for _ in range(num_parallel_runs)]
+        #     refined_sqls = [future.result() for future in futures]
 
+        refined_results_to_sql = []
+        for i in range(num_parallel_runs):
+            refined_results_to_sql.append(self._self_refinement(initial_prompt, exploration_results, expected_format))
+
+        results_list = list(refined_results_to_sql.keys())
         # Simple voting mechanism: choose the SQL query that appears most frequently. TODO refine this maybe
-        final_sql = max(set(refined_sqls), key=refined_sqls.count)
+        final_sql = refined_results_to_sql[max(results_list, key=results_list.count)]
         logger.info(f"\nFinal SQL selected after voting:{final_sql}")
 
         # Step 6: Execute final query and return the result.
