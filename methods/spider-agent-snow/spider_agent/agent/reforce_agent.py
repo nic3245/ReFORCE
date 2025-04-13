@@ -261,6 +261,11 @@ Task:
         
         return initial_prompt
     
+    def _parse_llm_response(self, response, pattern):
+        matches = re.findall(pattern, response)
+        return matches
+
+    
     def _explore_columns(self, prompt: str) -> Dict:
         """
         Apply column exploration to the database schema.
@@ -274,34 +279,85 @@ Task:
         {prompt}
 
         ######## COLUMN EXPLORATION ########
-        Your task is to prepare for answering the user's question by exploring the database schema in depth. Use the provided compressed schema and all relevant information. 
-        Ignore any chain-of-thought instructions mentioned previously that are not related to column exploration.
+        Your task is to prepare for answering the user's question by exploring the columns in the database schema in depth. Use the provided compressed schema and all relevant information. 
+        Please generate 1 new SQL query each time.
 
         ### Instructions:
-        Generate a list of SQL queries that will help you:
+        Generate a SQL query that will help you:
         1. Identify **relevant tables and columns** for the task.
         2. Retrieve **data types** and **example values** from these columns.
         3. Understand **nested structures**, if any, by using dialect-specific tools like `LATERAL FLATTEN` for JSON or nested types.
         4. Observe **column value distributions**, including distinct values, value ranges, or representative samples.
 
         ### Guidelines:
-        - Use the SQL dialect inferred from the table structure (e.g., Snowflake, BigQuery, SQLite).
-        - Start with **simple SELECT queries** to inspect a few rows from each relevant table.
+        - Use the Snowflake SQL dialect.
+        - Start with **SELECT queries** to inspect a few rows from each relevant table.
         - Progress to **more focused queries** using `SELECT DISTINCT`, basic filtering (`LIKE`, `LIMIT`, etc.).
         - Include **exploration of nested or JSON fields** using dialect-specific constructs.
-        - Each query should be concise and interpretable on its own.
+        - Each query should be concise and interpretable on its own, different from the previous queries.
         - Avoid using complex CTEs or joins at this stage. Focus on **schema and data understanding**.
-
-        No explanations or commentary—just the queries. Generate until you have a complete exploration or exceed 20 queries.
-        Provide only the SQL statements in a list: Result: ["SQL QUERY 1", "SQL QUERY 2", ...]. 
+        
+        No explanations or commentary—just the query. 
+        Provide the single query output in this format. 
+        '''sql
+        <your query here>
+        '''
         """
+        
+        exploration_history = []
+        exploration_history.append({
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": self.system_message 
+                },
+            ]
+        })
+        sql_queries = []
+        i = 0
+        sql_pattern = r"'''sql\r?\n([\s\S]*?)\r?\n'''"
+        while len(sql_queries) < 5:
+            output = self._get_llm_response(exploration_prompt, "Column Exploration", exploration_history)
+            logger.info(f"LLM Output {i}: {output}")
 
-        empty_history = []
-        output = self._get_llm_response(exploration_prompt, "Column Exploration", empty_history)
-        logger.info(f"SQL Actions: {output}")
-        logger.info(f"PROMPT: {prompt}")
-        # TODO - Parse the output into list of sql queries (similar to predict from PromptAgent)
-        # TODO - Algorithm one from the paper
+            history_string = ""
+            matches = self._parse_llm_response(output, sql_pattern)
+            if matches:
+                logger.info(f"Found Match!{len(sql_queries)}")
+                sql_queries.append(matches[0])
+                # set history string to appropriate msg 
+                history_string = f"""
+                An exploration query was found successfully in the output you provided: 
+                '''sql
+                {matches[0]}
+                '''
+                When prompted to give the next query, please make the query different from ALL previously generated queries. 
+                """
+            else:
+                # set history string to appropriate msg 
+                history_string = f"""
+                An exploration query was not found in the output you provided: 
+                {output}
+                
+                ### FIX: 
+                Please follow ALL instructions and guidelines clearly given regarding column exploration.
+                Verify the final output is given in this format. 
+                '''sql
+                    <your query here>
+                '''
+                """
+            exploration_history.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Exploration {i}: {history_string}\n"
+                    }
+                ]
+            })  
+            i += 1
+
         def algorithm_one(sql_actions):
             def self_correct(sql_repr, result):
                 correction_prompt = f"""
@@ -309,41 +365,48 @@ Task:
                     - An incorrect user generated SQL query
                     - The results from running that query
 
+                    User Generated SQL Query:
+                    {sql_repr}
+
+                    Result:
+                    {result}
+
                     Your task is to **correct the SQL query** so that it runs correctly and returns valid, structured results. 
                     Use all previous information provided to you and your expert SQL knowledge to correct the query. 
 
                     Here are your goals:
                     1. Fix all syntax errors in the SQL query.
                     2. Logically verify that the query can return the intended correct results.
-                    3. Ensure the query returns a non-empty, meaningful result.
+                    3. Ensure the query returns a non-empty, meaningful result with all columns containing valid data.
                     4. Avoid columns with all NULL values or obviously invalid data types.
-                    5. If the original query seems too complex or ambiguous, simplify it while preserving intent.
+                    5. Use context of previous queries to guide the correction.
                     
                     Respond with **only one corrected SQL query**. Do not include any explanation or comments.
-
-                    User Generated SQL Query:
-                    {sql_repr}
-
-                    Execution Result:
-                    {result}
+                    Provide the final output of the corrected query in this format. 
+                    '''sql
+                        <your query here>
+                    '''
                 """
 
                 header = "SQL Correction Task"
-                correction = self._get_llm_response(correction_prompt, header, self.correction_messages)
-                correction_result = f"""
+                correction_response = self._get_llm_response(correction_prompt, header, self.correction_messages)
+                corrected_sql = self._parse_llm_response(correction_response, sql_pattern)
 
-                    The previous query was corrected as follows:
+                correction_result = f"""
+                    User Generated SQL Query:
+                    {sql_repr}
+
+                    The following correction was applied to the User Generated SQL Query:
 
                     Corrected SQL Query:
-                    {correction}
+                    {correction_response}
 
-                    Please use this as context for future improvements or related queries.
+                    Please use this as context for future related queries.
                 """
 
                 message = correction_prompt + correction_result
-                
                 self.correction_messages.append({
-                    "role": "user", # XXX idk if this works
+                    "role": "user", 
                     "content": [
                         {
                             "type": "text",
@@ -351,33 +414,52 @@ Task:
                         }
                     ]
                 }) 
-                return correction
+                if corrected_sql:
+                    return corrected_sql
+                return "None"
             
-            sql_coms = ["SELECT * FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 LIMIT 5;", 
-"SELECT DISTINCT USER_PSEUDO_ID FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111;", 
-"SELECT EVENT_DATE, COUNT(*) FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 GROUP BY EVENT_DATE;", 
-"SELECT TO_DATE(TO_TIMESTAMP_NTZ(EVENT_TIMESTAMP/1e6)) AS event_date FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 LIMIT 5;", 
-"SELECT EVENT_NAME, COUNT(*) FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 GROUP BY EVENT_NAME LIMIT 10;", 
-"SELECT USER_PSEUDO_ID, COUNT(*) FROM GA4_OBFUSCATED_SAMPLE_ECOMMERCE.EVENTS_20210111 GROUP BY USER_PSEUDO_ID HAVING COUNT(*) > 1;", 
-"SELECT * FROM LATERAL FLATTEN(INPUT => PARSE_JSON(EVENT_PARAMS)) AS params WHERE KEY = 'search_term' LIMIT 5;"]
-            
-            sql_actions = []
-            for sql in sql_coms:
-                action = SNOWFLAKE_EXEC_SQL(sql_query=sql, is_save=False)
-                sql_actions.append(action)
 
             result_dic = {}
             error_rec = 0
 
             while len(sql_actions) > 0:
                 sql_action = sql_actions.pop(0)
+                logger.info(type(sql_action))
                 result = self.env.step(sql_action)
                 try:
                     logger.info(f"Result: {result}")
-                    df = pd.read_csv(StringIO(result))
+                    match = re.search(r"(?s)(USER_PSEUDO_ID\s+EVENT_DATE\s+EVENT_COUNT.*?)(?=', False\))", result, re.DOTALL)
+                    if not match:
+                        raise ValueError("Could not find table text in the given string.")
+
+                    table_str = match.group(1).strip()
+                    df = pd.read_csv(StringIO(table_str), sep=r"\s+")
                     empty_cols = df.columns[df.isnull().all()]
+                    snowflake_pattern = re.compile(r'sql_query\s*=\s*"([^"]+)"')
+                    snowflake_match = snowflake_pattern.search(sql_action.__repr__())
                     if len(empty_cols) != 0:
+                        message = f"""
+                            The following SQL query contained empty columns: {list(empty_cols)}
+
+                            Query:
+                            {snowflake_match.group(1)}
+
+                            Result (first 5 or fewer rows):
+                            {df.head(5).to_string(index=False)}
+
+                            This query is incorrected needs to be revised. Please remember this query and try to avoid the empty columns for future generated queries.
+                            """
+                        self.correction_messages.append({
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"{message}"
+                                }
+                            ]
+                        }) 
                         raise ValueError(f"Encountered empty columns: {list(empty_cols)}")
+                    logger.info(f"result dict")
                     result_dic[sql_action] = df
                     error_rec = 0
                     message = f"""
@@ -389,10 +471,10 @@ Task:
                         Result (first 5 or fewer rows):
                         {df.head(5).to_string(index=False)}
 
-                        This query does not need need to be revised. Please remember this query and its result as context for future corrections.
+                        This query is excellent and does not need need to be revised. Please remember this query and its result as context to assist with future corrections.
                         """
                     self.correction_messages.append({
-                        "role": "user", # XXX idk if this works
+                        "role": "user",
                         "content": [
                             {
                                 "type": "text",
@@ -404,34 +486,71 @@ Task:
                 except: 
                 # correction
                     max_iter = 3
-                    simplify = False
+                    # simplify = False
                     corrected_sql = None
 
                     for i in range(max_iter):
-                        # TODO - implement method add chat_session as parameter
                         sql_repr = sql_action.__repr__()
                         corrected_sql = self_correct(sql_repr, result)
-                        result = self.env.step(corrected_sql)
+                        if corrected_sql == "None":
+                            continue
+
+                        new_action = SNOWFLAKE_EXEC_SQL(corrected_sql, is_save=False)
+                        result = self.env.step(new_action)
                         try:
-                            df = pd.read_csv(StringIO(result))
-                            empty_cols = df.columns[df.isnull().all()]
+                            match = re.search(r"(USER_PSEUDO_ID.*?\n\d+.*?)(?=', False\))", result, re.DOTALL)
+                            if not match:
+                                raise ValueError("Could not find table text in the given string.")
+
+                            table_str = match.group(1)
+                            corrected_df = pd.read_csv(StringIO(table_str), sep=r"\s+")
+                            corrected_empty_cols = corrected_df.columns[df.isnull().all()]
+                            corrected_snowflake_pattern = re.compile(r'sql_query\s*=\s*"([^"]+)"')
+                            corrected_snowflake_match = corrected_snowflake_pattern.search(sql_action.__repr__())
                             if len(empty_cols) != 0:
+                                message = f"""
+                                The following corrected SQL query contained empty columns: {list(corrected_empty_cols)}
+
+                                Query:
+                                {corrected_snowflake_match.group(1)}
+
+                                Result (first 5 or fewer rows):
+                                {corrected_df.head(5).to_string(index=False)}
+
+                                This query is incorrected needs to be revised. Please remember this query and try to avoid the empty columns for future generated queries.
+                                """
+                                self.correction_messages.append({
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": f"{message}"
+                                        }
+                                    ]
+                                }) 
                                 raise ValueError(f"Encountered empty columns: {list(empty_cols)}")
                         except:
                             continue
-                        result_dic[sql_action] = df
+                        logger.info(f"result dict")
+                        result_dic[sql_action] = corrected_df
                         error_rec = 0
 
                         # apply correction to rest of sql_actions
                         for i in range(len(sql_actions)):
                             next_sql_repr = sql_actions[i].__repr__()
                             next_corrected_sql = self_correct(next_sql_repr, result)
-                            sql_actions[i] = next_corrected_sql
+                            if not next_corrected_sql == "None":
+                                sql_actions[i] = next_corrected_sql 
                         break
                     error_rec += 1
                 if error_rec > 5:
                     return result_dic
             return result_dic
+        
+        output = []
+        for query in sql_queries:
+            action = SNOWFLAKE_EXEC_SQL(query, is_save=False)
+            output.append(action)
         
         column_info = algorithm_one(output)
         logger.info(f"Generated column info specification: {column_info}")
