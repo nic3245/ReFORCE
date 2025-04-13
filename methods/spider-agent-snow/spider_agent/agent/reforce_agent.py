@@ -425,7 +425,7 @@ Task:
             while len(sql_actions) > 0:
                 sql_action = sql_actions.pop(0)
                 logger.info(type(sql_action))
-                result = self.env.step(sql_action)
+                result, _ = self.env.step(sql_action)
                 try:
                     logger.info(f"Result: {result}")
                     match = re.search(r"(?s)(USER_PSEUDO_ID\s+EVENT_DATE\s+EVENT_COUNT.*?)(?=', False\))", result, re.DOTALL)
@@ -496,7 +496,8 @@ Task:
                             continue
 
                         new_action = SNOWFLAKE_EXEC_SQL(corrected_sql, is_save=False)
-                        result = self.env.step(new_action)
+                        result, _ = self.env.step(new_action)
+                        logger.info(result)
                         try:
                             match = re.search(r"(USER_PSEUDO_ID.*?\n\d+.*?)(?=', False\))", result, re.DOTALL)
                             if not match:
