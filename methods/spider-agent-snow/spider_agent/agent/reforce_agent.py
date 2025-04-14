@@ -159,7 +159,7 @@ class ReFoRCEAgent(PromptAgent):
         schema_info = {}
         
         # Execute bash commands to gather schema information
-        obs, _ = self.env.step(Bash(code="find . -name '*.json' -o -name '*.csv' | grep -v 'result.json' | grep -v 'results.csv'"))
+        obs, _ = self.env.step(Bash(code="find . -name '*.json' -o -name '*.csv' -o -name '*.md' | grep -v 'result.json' | grep -v 'results.csv'"))
         
         # Parse the output and extract schema information
         for line in obs.split('\n'):
