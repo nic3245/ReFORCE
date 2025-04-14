@@ -135,11 +135,15 @@ Do not output an empty string!
 
 1. When referencing table names in Snowflake SQL, you must include both the database_name and schema_name. For example, for /workspace/DEPS_DEV_V1/DEPS_DEV_V1/ADVISORIES.json, if you want to use it in SQL, you should write DEPS_DEV_V1.DEPS_DEV_V1.ADVISORIES.
 
-2. Do not write SQL queries to retrieve the schema; use the existing schema documents in the folders.
+2. Do not write SQL queries to retrieve the schema; use the existing schema given to you.
 
 3. When encountering bugs, carefully analyze and think them through; avoid writing repetitive code.
 
 4. Column names must be enclosed in quotes. But don't use \",just use ".
+
+5. Do not use wildcards, they are not allowed in Snowflake SQL.
+
+6. Ensure you only use Snowflake SQL dialect.
 
 
 # RESPONSE FROMAT # 

@@ -122,6 +122,8 @@ class ReFoRCEAgent(PromptAgent):
                 return json.loads(obs)
             elif file_path.endswith('.csv'):
                 return pd.read_csv(StringIO(obs))
+            elif file_path.endswith('.md'):
+                return obs
             return obs
         except Exception as e:
             iter = 0
@@ -161,7 +163,7 @@ class ReFoRCEAgent(PromptAgent):
         
         # Parse the output and extract schema information
         for line in obs.split('\n'):
-            if '.json' in line or '.csv' in line:
+            if '.json' in line or '.csv' in line or '.md' in line:
                 file_path = line.strip()
                 content = self._read_file_content(file_path)
                 if content:
@@ -428,7 +430,7 @@ Task:
 
             while len(sql_actions) > 0:
                 sql_action = sql_actions.pop(0)
-                logger.info(type(sql_action))
+                logger.info(f"running: {sql_action.__repr__()}")
                 result, _ = self.env.step(sql_action)
                 try:
                     logger.info(f"Result: {result}")
@@ -655,7 +657,7 @@ Task:
                         return False
                 except:
                     return False
-            elif expected_type_lower in ['str', 'string', 'text']:
+            elif expected_type_lower in ['str', 'string', 'text', 'varchar']:
                 # Check if all values in the column can be converted to string
                 try:
                     df_csv_lower[col_name].astype(str)
@@ -713,7 +715,7 @@ Task:
                         except Exception:
                             error_count += 1
                             action, obs = self._prompt_agent_until_sql_query(obs)
-
+                            continue
                     # Round numeric columns to two decimal places
                     numeric_columns = df_csv.select_dtypes(include=[np.number]).columns
                     df_csv[numeric_columns] = df_csv[numeric_columns].round(2)
