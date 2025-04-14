@@ -694,20 +694,25 @@ Task:
         last_message_index = len(self.history_messages)
         while itercount < self.max_steps: # number of overall individual! tries to give it and total possible queries
             error_count = 0
+            format_error = 0
             obs = f"{str(prompt)}\nThese are the results of exploring the schema: {exploration_results}"
             self.history_messages = self.history_messages[:last_message_index] # reset history for each iteration
             # prompt until you get a sql query
             action, obs = self._prompt_agent_until_sql_query(obs)
             # Once you have a SQL query, refine until works or too many consecutive errors
-            while error_count < 3:
+            while error_count < 3 and format_error < 3:
                 # TODO abstract from swamy algo 1
-                if ("error" not in obs or "traceback" not in obs) and obs != "SQL command executed successfully. No output.":
-
+                if ("Error" not in obs or "Traceback" not in obs) and obs != "SQL command executed successfully. No output.":
+                    
                     # Parse results into a DataFrame
                     if action.save_path:
                         df_csv = self._read_file_content(action.save_path)
                     else:
-                        df_csv = pd.read_csv(obs)
+                        try:
+                            df_csv = pd.read_csv(obs)
+                        except Exception:
+                            error_count += 1
+                            action, obs = self._prompt_agent_until_sql_query(obs)
 
                     # Round numeric columns to two decimal places
                     numeric_columns = df_csv.select_dtypes(include=[np.number]).columns
@@ -726,6 +731,7 @@ Task:
                         for series in df_csv.columns:
                             if df_csv[series].dtype == "object":
                                 df_csv = df_csv.explode(series)
+
                     
                     if self._validate_format(df_csv, format_spec):
                         # Append to results if valid
@@ -738,7 +744,8 @@ Task:
                             return {tuple(normalized_df): action}
                         break # break out of loop for errors as we had a success
                     else:
-                        self._prompt_agent_until_sql_query(f"The csv below you returned does not meet the required format.\n\nCSV Returned:\n {df_csv.to_dict()}\n\nRequired Format:\n{format_spec}\n\nPlease return a corrected query that returns results matching the required format.")
+                        format_error += 1
+                        action, obs = self._prompt_agent_until_sql_query(f"The csv below you returned does not meet the required format.\n\nCSV Returned:\n {df_csv.to_dict()}\n\nRequired Format:\n{format_spec}\n\nPlease return a corrected query that returns results matching the required format.")
                 else:
                     # Increment error counter
                     error_count += 1
