@@ -121,6 +121,12 @@ import json
 import pandas as pd
 import snowflake.connector
 
+
+pd.set_option('display.max_rows', None)  # Show all rows
+pd.set_option('display.max_columns', None)  # Show all columns
+pd.set_option('display.width', None)  # Auto-detect display width
+pd.set_option('display.max_colwidth', None)  # Show full content in each cell
+
 # Load Snowflake credentials
 snowflake_credential = json.load(open("/workspace/snowflake_credential.json"))
 

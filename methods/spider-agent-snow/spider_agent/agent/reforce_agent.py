@@ -11,7 +11,7 @@ import re
 from io import StringIO
 import numpy as np
 
-from spider_agent.agent.prompts import SNOWFLAKE_REFORCE_SYSTEM
+from spider_agent.agent.prompts import SNOWFLAKE_REFORCE_SYSTEM, EXPLORATION_REFORCE_SYSTEM
 from spider_agent.agent.action import Action, Bash, Terminate, CreateFile, EditFile, LOCAL_DB_SQL, BIGQUERY_EXEC_SQL, SNOWFLAKE_EXEC_SQL, BQ_GET_TABLES, BQ_GET_TABLE_INFO, BQ_SAMPLE_ROWS
 from spider_agent.agent.models import call_llm
 
@@ -44,6 +44,11 @@ class ReFoRCEAgent(PromptAgent):
     ):
         super().__init__(model, max_tokens, top_p, temperature, 
                           max_memory_length, max_steps, use_plan)
+        
+        pd.set_option('display.max_rows', None)  # Show all rows
+        pd.set_option('display.max_columns', None)  # Show all columns
+        pd.set_option('display.width', None)  # Auto-detect display width
+        pd.set_option('display.max_colwidth', None)  # Show full content in each cell
         self.parallel_count = parallel_count
         self.max_refinement_iterations = max_refinement_iterations
         self.results_cache = {}  # Cache for storing execution results
@@ -296,12 +301,11 @@ Task:
         - Include **exploration of nested or JSON fields** using dialect-specific constructs.
         - Each query should be concise and interpretable on its own, different from the previous queries.
         - Avoid using complex CTEs or joins at this stage. Focus on **schema and data understanding**.
-        
-        No explanations or commentary—just the query. 
+
         Provide the single query output in this format. 
-        '''sql
+        ```sql
         <your query here>
-        '''
+        ```
         """
         
         exploration_history = []
@@ -310,13 +314,13 @@ Task:
             "content": [
                 {
                     "type": "text",
-                    "text": self.system_message 
+                    "text": EXPLORATION_REFORCE_SYSTEM
                 },
             ]
         })
         sql_queries = []
         i = 0
-        sql_pattern = r"'''sql\r?\n([\s\S]*?)\r?\n'''"
+        sql_pattern = r"```sql\r?\n([\s\S]*?)\r?\n```"
         while len(sql_queries) < 5:
             output = self._get_llm_response(exploration_prompt, "Column Exploration", exploration_history)
             logger.info(f"LLM Output {i}: {output}")
@@ -343,9 +347,9 @@ Task:
                 ### FIX: 
                 Please follow ALL instructions and guidelines clearly given regarding column exploration.
                 Verify the final output is given in this format. 
-                '''sql
+                ```sql
                     <your query here>
-                '''
+                ```
                 """
             exploration_history.append({
                 "role": "user",
@@ -383,9 +387,9 @@ Task:
                     
                     Respond with **only one corrected SQL query**. Do not include any explanation or comments.
                     Provide the final output of the corrected query in this format. 
-                    '''sql
+                    ```sql
                         <your query here>
-                    '''
+                    ```
                 """
 
                 header = "SQL Correction Task"
@@ -415,7 +419,7 @@ Task:
                     ]
                 }) 
                 if corrected_sql:
-                    return corrected_sql
+                    return corrected_sql[-1]
                 return "None"
             
 
@@ -428,8 +432,9 @@ Task:
                 result, _ = self.env.step(sql_action)
                 try:
                     logger.info(f"Result: {result}")
-                    match = re.search(r"(?s)(USER_PSEUDO_ID\s+EVENT_DATE\s+EVENT_COUNT.*?)(?=', False\))", result, re.DOTALL)
+                    match = re.search(r"(?:.*?warn_incompatible_dep\(\s*)?(\s*[A-Z_]+(?:\s+[A-Z_]+)*\s*\n(?:\s*\d+.*\n?)+)", result, re.DOTALL)
                     if not match:
+                        result_dic[sql_action.__repr__()] = re.search(r"(?:.*?warn_incompatible_dep\(\s*\n?\s*)?(.+(?:\n.+)*)", result, re.DOTALL)
                         raise ValueError("Could not find table text in the given string.")
 
                     table_str = match.group(1).strip()
@@ -457,10 +462,11 @@ Task:
                                     "text": f"{message}"
                                 }
                             ]
-                        }) 
+                        })
+                        result_dic[sql_action.__repr__()] = df.to_dict() 
                         raise ValueError(f"Encountered empty columns: {list(empty_cols)}")
-                    logger.info(f"result dict")
-                    result_dic[sql_action] = df
+                    logger.info(f"{result_dic}")
+                    result_dic[sql_action.__repr__()] = df.to_dict()
                     error_rec = 0
                     message = f"""
                         The following SQL query executed successfully and returned correct results:
@@ -499,8 +505,9 @@ Task:
                         result, _ = self.env.step(new_action)
                         logger.info(result)
                         try:
-                            match = re.search(r"(USER_PSEUDO_ID.*?\n\d+.*?)(?=', False\))", result, re.DOTALL)
+                            match = re.search(r"(?:.*?warn_incompatible_dep\(\s*)?(\s*[A-Z_]+(?:\s+[A-Z_]+)*\s*\n(?:\s*\d+.*\n?)+)", result, re.DOTALL)
                             if not match:
+                                result_dic[sql_action.__repr__()] = re.search(r"(?:.*?warn_incompatible_dep\(\s*\n?\s*)?(.+(?:\n.+)*)", result, re.DOTALL)
                                 raise ValueError("Could not find table text in the given string.")
 
                             table_str = match.group(1)
@@ -529,11 +536,12 @@ Task:
                                         }
                                     ]
                                 }) 
+                                result_dic[sql_action.__repr__()] = corrected_df.to_dict()
                                 raise ValueError(f"Encountered empty columns: {list(empty_cols)}")
                         except:
                             continue
-                        logger.info(f"result dict")
-                        result_dic[sql_action] = corrected_df
+                        logger.info(f"{result_dic}")
+                        result_dic[sql_action.__repr__()] = corrected_df.to_dict()
                         error_rec = 0
 
                         # apply correction to rest of sql_actions
@@ -623,7 +631,7 @@ Task:
         # Can also somewhat base this off of PromptAGent as far as executing actions goes, even though it'll just be sql
         # A lot of the PromptAgent stuff is written so that it can be multi-modal databases but we're just sql for now.
         # TODO: algorithm two from the paper (including validate result based on format spec)
-        logger.info("TODO: algorithm two from the paper")
+        # logger.info("TODO: algorithm two from the paper")
         assert self.env is not None, "Environment is not set."
         itercount = 0
         results_tables = []
@@ -712,7 +720,7 @@ Task:
 
         # Step 4: Column exploration
         exploration_results = self._explore_columns(initial_prompt)
-        print(exploration_results)
+        # print(exploration_results)
 
         # Step 5: Self-refinement using parallel execution for robustness
         # TODO - fix with signals b/c they don't work if not in main thread :( big sad
