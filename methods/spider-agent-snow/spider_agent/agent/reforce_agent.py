@@ -694,7 +694,7 @@ Task:
         itercount = 0
         results_tables = []
         last_message_index = len(self.history_messages)
-        while itercount < self.max_steps: # number of overall individual! tries to give it and total possible queries
+        while itercount < self.max_refinement_iterations: # number of overall individual! tries to give it and total possible queries
             error_count = 0
             format_error = 0
             obs = f"{str(prompt)}\nThese are the results of exploring the schema: {exploration_results}"
