@@ -737,13 +737,13 @@ Task:
                     
                     if self._validate_format(df_csv, format_spec):
                         # Append to results if valid
-                        normalized_df = [frozenset(row) for row in df_csv.values.tolist()]
+                        normalized_df = tuple(frozenset(row) for row in df_csv.values.tolist())
                         results_tables.append(normalized_df)
 
                         # Check for self-consistency
                         if results_tables.count(normalized_df) >= 2:
                             logger.info("Self consistency satisfied")
-                            return {tuple(normalized_df): action}
+                            return {normalized_df: action}
                         break # break out of loop for errors as we had a success
                     else:
                         format_error += 1
