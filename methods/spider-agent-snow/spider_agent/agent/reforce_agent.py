@@ -166,7 +166,7 @@ class ReFoRCEAgent(PromptAgent):
             if '.json' in line or '.csv' in line or '.md' in line:
                 file_path = line.strip()
                 content = self._read_file_content(file_path)
-                if content:
+                if content is not None:
                     schema_info[file_path] = content
 
         logger.info(f"Schema extracted files: {list(schema_info.keys())[:min(5, len(schema_info.keys()))]}")
