@@ -434,7 +434,7 @@ Task:
                     logger.info(f"Result: {result}")
                     match = re.search(r"(?:.*?warn_incompatible_dep\(\s*)?(\s*[A-Z_]+(?:\s+[A-Z_]+)*\s*\n(?:\s*\d+.*\n?)+)", result, re.DOTALL)
                     if not match:
-                        result_dic[sql_action.__repr__()] = re.search(r"(?:.*?warn_incompatible_dep\(\s*\n?\s*)?(.+(?:\n.+)*)", result, re.DOTALL)
+                        result_dic[sql_action.__repr__()] = re.search(r"(?:.*?warn_incompatible_dep\(\s*\n?\s*)?(.+(?:\n.+)*)", result, re.DOTALL).group(1).strip()
                         raise ValueError("Could not find table text in the given string.")
 
                     table_str = match.group(1).strip()
@@ -507,7 +507,7 @@ Task:
                         try:
                             match = re.search(r"(?:.*?warn_incompatible_dep\(\s*)?(\s*[A-Z_]+(?:\s+[A-Z_]+)*\s*\n(?:\s*\d+.*\n?)+)", result, re.DOTALL)
                             if not match:
-                                result_dic[sql_action.__repr__()] = re.search(r"(?:.*?warn_incompatible_dep\(\s*\n?\s*)?(.+(?:\n.+)*)", result, re.DOTALL)
+                                result_dic[sql_action.__repr__()] = re.search(r"(?:.*?warn_incompatible_dep\(\s*\n?\s*)?(.+(?:\n.+)*)", result, re.DOTALL).group(1).strip()
                                 raise ValueError("Could not find table text in the given string.")
 
                             table_str = match.group(1)
@@ -567,33 +567,6 @@ Task:
     
     def _prompt_agent_until_sql_query(self, obs):
         action = None
-        while not isinstance(action, SNOWFLAKE_EXEC_SQL):
-            # Get action and execute until it's a SQL query
-            _, action = self.predict(obs)
-
-            if action is None:
-                logger.info("Failed to parse action from response, try again.")
-                retry_count += 1
-                if retry_count > 3:
-                    logger.info("Failed to parse action from response, stop.")
-                    break
-                obs = "Failed to parse action from your response, make sure you provide a valid action."
-            else:
-                if last_action is not None and last_action == action:
-                    if repeat_action:
-                        return False, "ERROR: Repeated action"
-                    else:
-                        obs = "The action is the same as the last one, you MUST provide a DIFFERENT SQL code or Python Code or different action. you MUST provide a DIFFERENT SQL code or Python Code or different action. you MUST provide a DIFFERENT SQL code or Python Code or different action."
-                        repeat_action = True
-                else:
-                    obs, _ = self.env.step(action)
-                    last_action = action
-                    repeat_action = False
-        
-        return action, obs
-    
-    def _prompt_agent_until_sql_query(self, obs):
-        action = None
         last_action = None
         while not isinstance(action, SNOWFLAKE_EXEC_SQL):
             # Get action and execute until it's a SQL query
@@ -621,7 +594,90 @@ Task:
         return action, obs
     
     def _validate_format(self, df_csv, format_spec):
-        return True # TODO - ACTUALLY IMPLEMENT BASED ON FORMAT SPEC
+        """
+        Validates if a DataFrame follows the format specification.
+        
+        Parameters:
+        -----------
+        df_csv : pandas.DataFrame
+            The DataFrame to validate
+        format_spec : pandas.DataFrame
+            A dataframe with columns representing the column names and their values representing their types, as well as a
+            num_rows column with its value being the number of rows in the answer (-1 for any)
+            
+        Returns:
+        --------
+        bool
+            True if the DataFrame follows the format specification, False otherwise
+        """
+        import pandas as pd
+        import numpy as np
+        
+        # Create copies with lowercase column names to standardize
+        df_csv_lower = df_csv.copy()
+        df_csv_lower.columns = [col.lower() for col in df_csv_lower.columns]
+        
+        format_spec_lower = format_spec.copy()
+        format_spec_lower.columns = [col.lower() for col in format_spec_lower.columns]
+        
+        # Check if all required columns exist
+        columns = list(format_spec_lower.columns)[:-1]  # Exclude the num_rows column
+        if not set(columns).issubset(set(df_csv_lower.columns)):
+            print('hiiii')
+            return False
+        
+        # Check number of rows if specified (not -1)
+        if format_spec_lower['num_rows'].item() != -1 and len(df_csv_lower) != format_spec_lower['num_rows'].item():
+            print('hi')
+            return False
+        
+        # Check column types
+        for col_name in columns:
+            expected_type = format_spec_lower[col_name].item()  # Get the expected type from format_spec
+            # Get the expected type string in lowercase for comparison
+            expected_type_lower = str(expected_type).lower()
+            
+            # Handle different type specifications
+            if expected_type_lower in ['int', 'integer']:
+                # Check if all values in the column are integers
+                try:
+                    if not all(isinstance(val, (int, np.int64)) or (isinstance(val, float) and val.is_integer())
+                              for val in df_csv_lower[col_name] if pd.notna(val)):
+                        print('hiya')
+                        return False
+                except:
+                    print('hello')
+                    return False
+            elif expected_type_lower in ['float', 'decimal', 'number']:
+                # Check if all values in the column are numeric
+                try:
+                    if not pd.to_numeric(df_csv_lower[col_name], errors='coerce').notna().all():
+                        return False
+                except:
+                    return False
+            elif expected_type_lower in ['str', 'string', 'text']:
+                # Check if all values in the column can be converted to string
+                try:
+                    df_csv_lower[col_name].astype(str)
+                except:
+                    return False
+            elif expected_type_lower in ['date', 'datetime']:
+                # Check if all values in the column can be parsed as dates
+                try:
+                    pd.to_datetime(df_csv_lower[col_name], errors='raise')
+                except:
+                    return False
+            elif expected_type_lower in ['bool', 'boolean']:
+                # Check if all values in the column are boolean
+                try:
+                    if not all(isinstance(val, (bool, np.bool_)) for val in df_csv_lower[col_name] if pd.notna(val)):
+                        return False
+                except:
+                    return False
+            # Add more type checks as needed
+        
+        # All checks passed
+        return True
 
     def _self_refinement(self, prompt: str, exploration_results: Dict, format_spec: Dict):
         """
@@ -679,8 +735,10 @@ Task:
                         # Check for self-consistency
                         if results_tables.count(normalized_df) >= 2:
                             logger.info("Self consistency satisfied")
-                            return {normalized_df: action}
+                            return {tuple(normalized_df): action}
                         break # break out of loop for errors as we had a success
+                    else:
+                        self._prompt_agent_until_sql_query(f"The csv below you returned does not meet the required format.\n\nCSV Returned:\n {df_csv.to_dict()}\n\nRequired Format:\n{format_spec}\n\nPlease return a corrected query that returns results matching the required format.")
                 else:
                     # Increment error counter
                     error_count += 1
@@ -694,7 +752,7 @@ Task:
             itercount += 1
 
         # Return final refined SQL and result
-        return results_tables if results_tables else None
+        return {results_tables[-1]: action} if results_tables and action else None
     
     def run(self):
         """
@@ -736,15 +794,16 @@ Task:
         refined_results_to_sql = []
         for i in range(num_parallel_runs):
             refined_results_to_sql.append(self._self_refinement(initial_prompt, exploration_results, expected_format))
-
-        results_list = list(refined_results_to_sql.keys())
+        refined_results_to_sql = [f for f in refined_results_to_sql if f is not None]
+        results_list = [list(d.keys())[0] for d in refined_results_to_sql]
         # Simple voting mechanism: choose the SQL query that appears most frequently. TODO refine this maybe
-        final_sql = refined_results_to_sql[max(results_list, key=results_list.count)]
+        final_sql = refined_results_to_sql[0][results_list[0]]
+        # final_sql = refined_results_to_sql[max(results_list, key=results_list.count)]
         logger.info(f"\nFinal SQL selected after voting:{final_sql}")
 
         # Step 6: Execute final query and return the result.
         self.env.step(SNOWFLAKE_EXEC_SQL(final_sql, is_save=True, save_path='results.csv'))
         final_obs = self.env.step(Terminate('results.csv'))
-        return final_sql
+        return True, final_obs
     
         # TODO This does not include redoing if voting fails, or CTE-based refinement
