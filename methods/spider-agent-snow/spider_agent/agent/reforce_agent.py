@@ -805,14 +805,19 @@ Task:
             refined_results_to_sql.append(self._self_refinement(initial_prompt, exploration_results, expected_format))
         refined_results_to_sql = [f for f in refined_results_to_sql if f is not None]
         results_list = [list(d.keys())[0] for d in refined_results_to_sql]
+        if results_list:
         # Simple voting mechanism: choose the SQL query that appears most frequently. TODO refine this maybe
-        final_sql = refined_results_to_sql[0][results_list[0]]
+            final_sql = refined_results_to_sql[0][results_list[0]]
+            self.env.step(SNOWFLAKE_EXEC_SQL(final_sql, is_save=True, save_path='results.csv'))
+            final_obs = self.env.step(Terminate('results.csv'))
+        else:
+            final_sql = ''
+            final_obs = ''
         # final_sql = refined_results_to_sql[max(results_list, key=results_list.count)]
         logger.info(f"\nFinal SQL selected after voting:{final_sql}")
 
         # Step 6: Execute final query and return the result.
-        self.env.step(SNOWFLAKE_EXEC_SQL(final_sql, is_save=True, save_path='results.csv'))
-        final_obs = self.env.step(Terminate('results.csv'))
+        
         return True, final_obs
     
         # TODO This does not include redoing if voting fails, or CTE-based refinement
