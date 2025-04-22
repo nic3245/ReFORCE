@@ -1,4 +1,5 @@
-
+bfg*
+methods/spider-agent-snow/snowflake_credential.json
 spider2/evaluation_suite/*
 spider2/release_spider2/spider2c.jsonl
 spider2/evaluation_suite/gold/spider2c_eval.jsonl
